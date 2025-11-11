@@ -10,7 +10,7 @@ from xgboost import XGBRegressor
 # ==========================
 # 기본 설정
 # ==========================
-CSV_PATH = "서울시_아파트_전월세_요약.csv"   # CSV와 app.py가 같은 폴더에 있다고 가정
+CSV_PATH = "csv.csv"   # CSV와 app.py가 같은 폴더에 있다고 가정
 MODEL_PATH = "rent_xgb_model.pkl"
 
 st.set_page_config(page_title="서울 아파트 월세 예측", layout="centered")
