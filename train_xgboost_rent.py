@@ -1,218 +1,135 @@
 # app.py
 # -*- coding: utf-8 -*-
-import io
 import os
-import joblib
+import io
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-
+import joblib
 import streamlit as st
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from sklearn.preprocessing import OneHotEncoder
-from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import Pipeline
 
-# XGBoost 로더
-USE_XGB = True
-XGB_IMPORT_ERROR = ""
+# ====== 설정 ======
+CSV_PATH = "서울시_아파트_전월세_요약.csv"  # [시군구, 평수, 월세금(만원), 건축년도]
+MODEL_PATH = "rent_xgb_model.pkl"
+TITLE = "🏢 평수 입력 → 월세 예측"
+DESC = "평수(1개 특징)만으로 XGBoost 회귀 모델이 월세(만원)를 예측합니다."
+
+# ====== XGBoost 준비 ======
 try:
     from xgboost import XGBRegressor
 except Exception as e:
-    USE_XGB = False
-    XGB_IMPORT_ERROR = str(e)
+    st.stop()  # UI에서 에러 안내
+    raise
 
-DEFAULT_PATH = "서울시_아파트_전월세_요약.csv"  # [시군구, 평수, 월세금(만원), 건축년도]
+st.set_page_config(page_title="평수→월세 예측", layout="centered")
+st.title(TITLE)
+st.caption(DESC)
 
-st.set_page_config(page_title="평수→월세 예측 (XGBoost)", layout="wide")
-st.title("🏢 서울 아파트 평수 → 월세 예측 (XGBoost)")
-
-with st.sidebar:
-    st.header("데이터 불러오기")
-    uploaded = st.file_uploader("CSV 업로드 (예: 서울시_아파트_전월세_요약.csv)", type=["csv"])
-    use_default = st.checkbox("기본 경로 사용", value=not uploaded, help=f"현재 폴더의 '{DEFAULT_PATH}' 사용")
-
-    st.markdown("---")
-    st.subheader("전처리 옵션")
-    drop_zero = st.checkbox("전세(월세=0) 제거", value=True)
-    trim_outliers = st.checkbox("이상치 트리밍(IQR 상단 1.5)", value=True)
-    min_pyeong, max_pyeong = st.slider("평수 범위 필터", 3.0, 120.0, (3.0, 100.0), 0.5)
-    test_size = st.slider("테스트셋 비율", 0.05, 0.4, 0.2, 0.05)
-
-    st.markdown("---")
-    st.subheader("특징(Feature) 선택")
-    use_only_pyeong = st.checkbox("평수만 사용 (기본)", value=True)
-    use_year = st.checkbox("건축년도 포함", value=False, disabled=use_only_pyeong)
-    use_region = st.checkbox("시군구 포함(원-핫 인코딩)", value=False, disabled=use_only_pyeong)
-
-    st.markdown("---")
-    st.subheader("모델 설정")
-    n_estimators = st.slider("n_estimators", 50, 600, 300, 50)
-    max_depth = st.slider("max_depth", 2, 12, 4, 1)
-    learning_rate = st.select_slider("learning_rate", options=[0.03, 0.05, 0.08, 0.1, 0.2], value=0.08)
-    reg_lambda = st.select_slider("reg_lambda", options=[0.0, 0.5, 1.0, 2.0, 5.0], value=1.0)
-    train_btn = st.button("🔁 모델 학습 / 재학습")
-
-def read_csv_safely(file_or_path):
+# ====== 데이터 로딩 & 정제 ======
+@st.cache_data(show_spinner=False)
+def read_csv_safely(path: str) -> pd.DataFrame:
     tried = []
     for enc in ["utf-8-sig", "cp949"]:
         try:
-            return pd.read_csv(file_or_path, encoding=enc)
+            return pd.read_csv(path, encoding=enc)
         except Exception as e:
             tried.append(f"{enc}: {e}")
-            continue
-    return pd.read_csv(file_or_path)
+    # 마지막 시도
+    return pd.read_csv(path)
 
-if uploaded is not None:
-    df_raw = read_csv_safely(uploaded)
-elif use_default and os.path.exists(DEFAULT_PATH):
-    df_raw = read_csv_safely(DEFAULT_PATH)
-else:
-    st.warning("CSV를 업로드하거나 '기본 경로 사용'을 체크해 주세요.")
-    st.stop()
-
-expected = ["시군구", "평수", "월세금(만원)", "건축년도"]
-missing = [c for c in expected if c not in df_raw.columns]
-if missing:
-    st.error(f"필수 컬럼이 누락되었습니다: {missing}\nCSV에 다음 컬럼이 있어야 합니다: {expected}")
-    st.stop()
-
-df = df_raw.copy()
-df["평수"] = pd.to_numeric(df["평수"], errors="coerce")
-df["월세금(만원)"] = pd.to_numeric(df["월세금(만원)"], errors="coerce")
-df["건축년도"] = pd.to_numeric(df["건축년도"], errors="coerce")
-
-df = df[(df["평수"] >= min_pyeong) & (df["평수"] <= max_pyeong)]
-df = df.dropna(subset=["평수", "월세금(만원)"])
-if drop_zero:
-    df = df[df["월세금(만원)"] > 0]
-if trim_outliers and len(df) > 0:
+@st.cache_data(show_spinner=True)
+def load_and_clean(csv_path: str) -> pd.DataFrame:
+    df = read_csv_safely(csv_path)
+    for c in ["평수", "월세금(만원)"]:
+        if c not in df.columns:
+            raise ValueError(f"CSV에 '{c}' 컬럼이 필요합니다.")
+    df["평수"] = pd.to_numeric(df["평수"], errors="coerce")
+    df["월세금(만원)"] = pd.to_numeric(df["월세금(만원)"], errors="coerce")
+    df = df.dropna(subset=["평수", "월세금(만원)"])
+    df = df[df["월세금(만원)"] > 0]  # 전세 제거
+    # 가벼운 이상치 컷(IQR 상단)
     q1, q3 = df["월세금(만원)"].quantile([0.25, 0.75])
     iqr = q3 - q1
     upper = q3 + 1.5 * iqr
     df = df[df["월세금(만원)"] <= upper]
+    # 극단 평수 컷(옵션)
+    df = df[(df["평수"] >= 3) & (df["평수"] <= 100)]
+    return df
 
-st.success(f"데이터 준비 완료: {len(df):,}건")
-with st.expander("데이터 미리보기"):
-    st.dataframe(df.head(20))
-
-feature_cols = ["평수"]
-if not use_only_pyeong:
-    if use_year:
-        feature_cols.append("건축년도")
-    if use_region:
-        feature_cols.append("시군구")
-
-X_df = df[feature_cols].copy()
-y = df["월세금(만원)"].values
-
-numeric_features = [c for c in feature_cols if c != "시군구"]
-categorical_features = ["시군구"] if "시군구" in feature_cols else []
-
-from sklearn.compose import ColumnTransformer
-from sklearn.preprocessing import OneHotEncoder
-preprocess = ColumnTransformer(
-    transformers=[
-        ("num", "passthrough", numeric_features),
-        ("cat", OneHotEncoder(handle_unknown="ignore"), categorical_features),
-    ],
-    remainder="drop",
-)
-
-if not USE_XGB:
-    st.error("xgboost가 설치되어 있지 않습니다. 터미널에서 `pip install xgboost` 후 다시 실행하세요.")
-    st.stop()
-
-from xgboost import XGBRegressor
-reg = XGBRegressor(
-    n_estimators=int(n_estimators),
-    max_depth=int(max_depth),
-    learning_rate=float(learning_rate),
-    subsample=0.9,
-    colsample_bytree=1.0,
-    reg_lambda=float(reg_lambda),
-    random_state=42,
-    n_jobs=1,
-    tree_method="hist",
-    objective="reg:squarederror",
-)
-
-model = Pipeline(steps=[("prep", preprocess), ("reg", reg)])
-
-if train_btn or "fitted_" not in st.session_state:
-    if len(df) < 10:
-        st.warning("데이터가 너무 적어 학습이 어려워요. 최소 10건 이상 권장합니다.")
-    X_train, X_test, y_train, y_test = train_test_split(
-        X_df, y, test_size=float(test_size), random_state=42
+# ====== 모델 로드/학습 ======
+@st.cache_resource(show_spinner=True)
+def get_or_train_model(csv_path: str, model_path: str):
+    if os.path.exists(model_path):
+        try:
+            model = joblib.load(model_path)
+            return model
+        except Exception:
+            pass  # 모델 불러오기 실패 시 재학습
+    df = load_and_clean(csv_path)
+    X = df[["평수"]].to_numpy(dtype=float)
+    y = df["월세금(만원)"].to_numpy(dtype=float)
+    model = XGBRegressor(
+        n_estimators=300,
+        max_depth=4,
+        learning_rate=0.08,
+        subsample=0.9,
+        colsample_bytree=1.0,
+        reg_lambda=1.0,
+        random_state=42,
+        n_jobs=1,
+        tree_method="hist",
+        objective="reg:squarederror",
     )
-    model.fit(X_train, y_train)
-    st.session_state["fitted_"] = True
-    st.session_state["model"] = model
-    st.session_state["X_test"] = X_test
-    st.session_state["y_test"] = y_test
-    st.toast("모델 학습 완료!", icon="✅")
+    model.fit(X, y)
+    joblib.dump(model, model_path)
+    return model
 
-if "model" not in st.session_state:
-    st.stop()
+# 파일 업로드(선택) 또는 기본 CSV 사용
+st.write("### 데이터 선택")
+up = st.file_uploader("CSV 업로드(선택) — 업로드 시 해당 파일로 학습합니다.", type=["csv"])
+if up is not None:
+    # 업로드된 파일로 임시 모델 학습 (디스크 저장 안 함)
+    df_tmp = pd.read_csv(up)
+    # 업로드 파일도 정제 함수 재사용
+    def _save_and_train_from_uploaded(df_csv: pd.DataFrame):
+        # 임시 경로에 저장 후 동일 파이프라인 사용
+        tmp_path = "_uploaded.csv"
+        df_csv.to_csv(tmp_path, index=False, encoding="utf-8-sig")
+        # 캐시 무효화를 위해 seed 파라미터를 넣어 호출
+        model = get_or_train_model(tmp_path, MODEL_PATH + ".tmp")
+        return model, tmp_path
+    try:
+        # 업로드 파일을 정제 함수가 기대하는 형식으로 저장 후 재사용
+        tmp_path = "_uploaded.csv"
+        df_tmp.to_csv(tmp_path, index=False, encoding="utf-8-sig")
+        model = get_or_train_model(tmp_path, MODEL_PATH + ".tmp")
+        data_path_in_use = "업로드 파일"
+    except Exception as e:
+        st.error(f"업로드 파일 처리 중 오류: {e}")
+        st.stop()
+else:
+    # 기본 파일 사용
+    if not os.path.exists(CSV_PATH):
+        st.error(f"기본 CSV가 없습니다: {CSV_PATH}")
+        st.stop()
+    model = get_or_train_model(CSV_PATH, MODEL_PATH)
+    data_path_in_use = CSV_PATH
 
-model = st.session_state["model"]
-X_test = st.session_state["X_test"]
-y_test = st.session_state["y_test"]
-pred = model.predict(X_test)
+st.success(f"모델 준비 완료 ✅  (데이터: {data_path_in_use})")
 
-mae = mean_absolute_error(y_test, pred)
-rmse = mean_squared_error(y_test, pred, squared=False)
-r2 = r2_score(y_test, pred)
+# ====== 예측 폼 ======
+st.markdown("### 🔮 월세 예측 폼")
+with st.form("predict_form"):
+    # 평수 입력 슬라이더/숫자
+    default_p = 25.0
+    pyeong = st.number_input("평수", min_value=3.0, max_value=100.0, value=default_p, step=0.5)
+    submitted = st.form_submit_button("예측하기")
 
-col1, col2, col3 = st.columns(3)
-col1.metric("MAE (만원)", f"{mae:.2f}")
-col2.metric("RMSE (만원)", f"{rmse:.2f}")
-col3.metric("R²", f"{r2:.3f}")
-
-st.subheader("실제 vs 예측 (테스트셋)")
-fig = plt.figure()
-plt.scatter(y_test, pred, alpha=0.6)
-plt.xlabel("실제 월세(만원)")
-plt.ylabel("예측 월세(만원)")
-plt.title("실제 vs 예측")
-st.pyplot(fig)
-
-st.markdown("---")
-st.header("🔮 월세 예측")
-
-inp_p = st.slider("평수", float(df["평수"].min()), float(df["평수"].max()), float(np.median(df["평수"])), 0.5)
-
-extra = {}
-if "건축년도" in feature_cols:
-    yr_min = int(np.nan_to_num(df["건축년도"].min(), nan=1990))
-    yr_max = int(np.nan_to_num(df["건축년도"].max(), nan=2025))
-    extra["건축년도"] = st.number_input("건축년도", min_value=1900, max_value=2100, value=min(max(yr_min, 1990), yr_max))
-
-if "시군구" in feature_cols:
-    regions = sorted(df["시군구"].dropna().unique().tolist())
-    extra["시군구"] = st.selectbox("시군구", options=regions, index=0 if regions else None)
-
-def build_input_row(pyeong: float, extras: dict) -> pd.DataFrame:
-    row = {"평수": float(pyeong)}
-    for k in ["건축년도", "시군구"]:
-        if k in feature_cols:
-            if k == "건축년도":
-                row[k] = extras.get(k, int(np.nan_to_num(df["건축년도"].median(), nan=2005)))
-            if k == "시군구":
-                row[k] = extras.get(k, df["시군구"].mode().iloc[0] if not df["시군구"].empty else "")
-    return pd.DataFrame([row], columns=feature_cols)
-
-if st.button("예측 실행"):
-    X_row = build_input_row(inp_p, extra)
+if submitted:
+    X_row = np.array([[float(pyeong)]], dtype=float)
     y_hat = float(model.predict(X_row)[0])
-    st.success(f"예측 월세: **{y_hat:.1f} 만원**")
+    st.subheader("예측 결과")
+    st.metric(label=f"{pyeong:.1f}평 예상 월세", value=f"{y_hat:.1f} 만원")
 
-st.markdown("---")
-st.subheader("모델 내보내기")
-bytes_buf = io.BytesIO()
-joblib.dump(model, bytes_buf)
-st.download_button("💾 학습 모델 다운로드 (.pkl)", data=bytes_buf.getvalue(), file_name="rent_xgb_model.pkl")
-
-st.caption("Tip: 평수 하나만으로는 지역·연식 효과를 반영하기 어려워 R²가 낮을 수 있어요. "
-           "사이드바에서 '건축년도', '시군구'를 추가하면 성능이 개선됩니다.")
+st.divider()
+st.caption("주의: 평수 1개 특징만 사용하므로 지역·연식 등은 반영되지 않습니다. "
+           "필요 시 다변수(건축년도, 시군구 등) 버전으로 확장해 드릴게요.")
