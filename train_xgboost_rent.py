@@ -12,7 +12,7 @@ MODEL_PATH = "rent_xgb_model.pkl"
 
 st.set_page_config(page_title="평수 → 월세 예측", layout="centered")
 st.title("🏢 평수만 입력 → 월세 예측 (XGBoost)")
-st.caption("CSV는 이미 준비되어 있다고 가정합니다. 평수 1개 특징으로 월세(만원)을 예측합니다.")
+st.caption("평수 1개 특징으로 월세(만원)을 예측합니다.")
 
 # ===== XGBoost =====
 from xgboost import XGBRegressor
