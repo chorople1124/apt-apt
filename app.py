@@ -80,38 +80,7 @@ model = train_or_load_model()
 st.success("모델 준비 완료 ✅")
 
 # ==========================
-# 📊 평수 vs 월세 그래프
-# ==========================
-st.subheader("📊 평수에 따른 월세 분포 및 예측 곡선")
-
-if len(df) > 0:
-    fig, ax = plt.subplots(figsize=(8, 5))
-
-    # 실제 데이터 산점도
-    ax.scatter(df["평수"], df["월세금(만원)"], alpha=0.5, label="실제 데이터")
-
-    # 모델 예측 곡선 (평수 범위 전체에 대해)
-    min_p = df["평수"].min()
-    max_p = df["평수"].max()
-    p_range = np.linspace(min_p, max_p, 100).reshape(-1, 1)
-    pred_range = model.predict(p_range)
-
-    ax.plot(p_range, pred_range, linewidth=2, label="모델 예측 곡선")
-
-    ax.set_title("평수에 따른 월세(만원)")
-    ax.set_xlabel("평수")
-    ax.set_ylabel("월세 (만원)")
-    ax.grid(True)
-    ax.legend()
-
-    st.pyplot(fig)
-else:
-    st.info("그래프를 그릴 데이터가 충분하지 않습니다.")
-
-st.divider()
-
-# ==========================
-# 평수 입력 → 예측
+# 📏 평수 입력 → 예측
 # ==========================
 st.subheader("📏 평수 입력")
 
@@ -128,10 +97,51 @@ pyeong = st.number_input(
     step=0.5
 )
 
+pred_for_input = float(model.predict(np.array([[pyeong]]))[0])
+
 if st.button("예상 월세 예측하기"):
-    X_input = np.array([[pyeong]])
-    pred = float(model.predict(X_input)[0])
-    st.metric(label=f"{pyeong:.1f}평 예상 월세", value=f"{pred:.1f} 만원")
+    st.metric(label=f"{pyeong:.1f}평 예상 월세", value=f"{pred_for_input:.1f} 만원")
+
+st.divider()
+
+# ==========================
+# 📊 입력한 평수를 기준으로 한 꺾은선 그래프
+# ==========================
+st.subheader("📊 입력 평수를 기준으로 한 예측 월세 꺾은선 그래프")
+
+if len(df) > 0:
+    # 데이터에서 가능한 평수 범위
+    min_p = float(df["평수"].min())
+    max_p = float(df["평수"].max())
+
+    # 입력 평수를 기준으로 ±10평 범위 (데이터 범위에 맞게 클리핑)
+    p_start = max(min_p, pyeong - 10)
+    p_end = min(max_p, pyeong + 10)
+
+    # 만약 범위가 너무 좁으면 전체 범위 사용
+    if p_start >= p_end:
+        p_start, p_end = min_p, max_p
+
+    p_range = np.linspace(p_start, p_end, 100).reshape(-1, 1)
+    pred_range = model.predict(p_range)
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+    # 꺾은선그래프 (평수 vs 예측 월세)
+    ax.plot(p_range, pred_range, linewidth=2)
+
+    # 입력한 평수 지점 표시
+    ax.scatter([pyeong], [pred_for_input], s=60)
+    ax.axvline(pyeong, linestyle="--")  # 기준선(입력 평수) 세로선
+
+    ax.set_title(f"{pyeong:.1f}평을 기준으로 한 예측 월세 곡선")
+    ax.set_xlabel("평수")
+    ax.set_ylabel("월세 (만원)")
+    ax.grid(True)
+
+    st.pyplot(fig)
+else:
+    st.info("그래프를 그릴 데이터가 충분하지 않습니다.")
 
 st.divider()
 st.caption(
