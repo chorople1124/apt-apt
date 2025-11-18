@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import joblib
 import streamlit as st
+import matplotlib.pyplot as plt
 from xgboost import XGBRegressor
 
 # ==========================
@@ -29,6 +30,7 @@ def load_data():
     if "평수" not in df.columns or "월세금(만원)" not in df.columns:
         st.error("CSV 파일에 '평수'와 '월세금(만원)' 컬럼이 있어야 합니다.")
         st.stop()
+
     df["평수"] = pd.to_numeric(df["평수"], errors="coerce")
     df["월세금(만원)"] = pd.to_numeric(df["월세금(만원)"], errors="coerce")
     df = df.dropna(subset=["평수", "월세금(만원)"])
@@ -73,14 +75,58 @@ def train_or_load_model():
     joblib.dump(model, MODEL_PATH)
     return model
 
+df = load_data()
 model = train_or_load_model()
 st.success("모델 준비 완료 ✅")
+
+# ==========================
+# 📊 평수 vs 월세 그래프
+# ==========================
+st.subheader("📊 평수에 따른 월세 분포 및 예측 곡선")
+
+if len(df) > 0:
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+    # 실제 데이터 산점도
+    ax.scatter(df["평수"], df["월세금(만원)"], alpha=0.5, label="실제 데이터")
+
+    # 모델 예측 곡선 (평수 범위 전체에 대해)
+    min_p = df["평수"].min()
+    max_p = df["평수"].max()
+    p_range = np.linspace(min_p, max_p, 100).reshape(-1, 1)
+    pred_range = model.predict(p_range)
+
+    ax.plot(p_range, pred_range, linewidth=2, label="모델 예측 곡선")
+
+    ax.set_title("평수에 따른 월세(만원)")
+    ax.set_xlabel("평수")
+    ax.set_ylabel("월세 (만원)")
+    ax.grid(True)
+    ax.legend()
+
+    st.pyplot(fig)
+else:
+    st.info("그래프를 그릴 데이터가 충분하지 않습니다.")
+
+st.divider()
 
 # ==========================
 # 평수 입력 → 예측
 # ==========================
 st.subheader("📏 평수 입력")
-pyeong = st.number_input("평수 입력", min_value=3.0, max_value=100.0, value=25.0, step=0.5)
+
+# 기본값: 데이터의 중앙값 사용 (없으면 25평)
+default_pyeong = 25.0
+if "평수" in df.columns and df["평수"].notna().sum() > 0:
+    default_pyeong = float(df["평수"].median())
+
+pyeong = st.number_input(
+    "평수 입력",
+    min_value=3.0,
+    max_value=100.0,
+    value=default_pyeong,
+    step=0.5
+)
 
 if st.button("예상 월세 예측하기"):
     X_input = np.array([[pyeong]])
@@ -88,5 +134,7 @@ if st.button("예상 월세 예측하기"):
     st.metric(label=f"{pyeong:.1f}평 예상 월세", value=f"{pred:.1f} 만원")
 
 st.divider()
-st.caption("⚙️ 참고: 현재 모델은 평수만을 고려하여 예측합니다. "
-           "건축년도·지역 등의 변수를 추가하면 정확도를 더 높일 수 있습니다.")
+st.caption(
+    "⚙️ 참고: 현재 모델은 평수만을 고려하여 예측합니다. "
+    "건축년도·지역 등의 변수를 추가하면 정확도를 더 높일 수 있습니다."
+)
