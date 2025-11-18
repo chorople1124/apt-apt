@@ -148,3 +148,26 @@ st.caption(
     "⚙️ 참고: 현재 모델은 평수만을 고려하여 예측합니다. "
     "건축년도·지역 등의 변수를 추가하면 정확도를 더 높일 수 있습니다."
 )
+def set_korean_font():
+    # OS별 기본 한글 폰트 경로
+    font_candidates = [
+        "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+        "/usr/share/fonts/truetype/nanum/NanumMyeongjo.ttf",
+        "/System/Library/Fonts/AppleSDGothicNeo.ttc",  # macOS
+        "/Library/Fonts/AppleSDGothicNeo.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.otf",
+    ]
+
+    for font_path in font_candidates:
+        if os.path.exists(font_path):
+            font_manager.fontManager.addfont(font_path)
+            mpl.rc("font", family=os.path.basename(font_path).split('.')[0])
+            break
+    else:
+        # 폰트를 못 찾으면 기본 sans-serif라도 사용하도록 설정
+        mpl.rc("font", family="sans-serif")
+
+    mpl.rcParams["axes.unicode_minus"] = False  # 마이너스 깨짐 방지
+
+set_korean_font()
