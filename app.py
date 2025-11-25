@@ -8,17 +8,16 @@ import streamlit as st
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 from matplotlib import font_manager
-from xgboost import XGBRegressor
+import xgboost as xgb   # ← sklearn 필요 없는 native XGBoost 사용
 
 # ==========================
 # 🔥 한글 폰트 깨짐 방지 설정
 # ==========================
 def set_korean_font():
-    # OS별로 자주 쓰는 한글 폰트 경로 후보
     font_candidates = [
         "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
         "/usr/share/fonts/truetype/nanum/NanumMyeongjo.ttf",
-        "/System/Library/Fonts/AppleSDGothicNeo.ttc",  # macOS 기본 한글
+        "/System/Library/Fonts/AppleSDGothicNeo.ttc",
         "/Library/Fonts/AppleSDGothicNeo.ttc",
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.otf",
@@ -28,33 +27,27 @@ def set_korean_font():
     for font_path in font_candidates:
         if os.path.exists(font_path):
             font_manager.fontManager.addfont(font_path)
-            # 파일 이름에서 폰트 패밀리 이름 대충 추출
             family_name = os.path.basename(font_path).split(".")[0]
             mpl.rc("font", family=family_name)
             chosen = font_path
             break
 
     if chosen is None:
-        # 폰트를 못 찾으면 기본 sans-serif라도 사용
         mpl.rc("font", family="sans-serif")
 
-    # 마이너스 기호 깨짐 방지
     mpl.rcParams["axes.unicode_minus"] = False
 
 set_korean_font()
 
-# ==========================
-# 기본 설정
-# ==========================
-CSV_PATH = "csv.csv"          # CSV와 app.py가 같은 폴더에 있다고 가정
-MODEL_PATH = "rent_xgb_model.pkl"
+CSV_PATH = "csv.csv"
+MODEL_PATH = "rent_xgb_model.json"   # ← Booster 저장 방식은 pkl이 아니라 json 추천
 
 st.set_page_config(page_title="서울 아파트 월세 예측", layout="centered")
 st.title("🏙️ 서울 아파트 월세 예측기")
 st.caption("전용 CSV를 이용해 평수(1개 변수)로 월세(만원)을 예측합니다.")
 
 # ==========================
-# CSV 불러오기 및 전처리
+# CSV 불러오기
 # ==========================
 @st.cache_data
 def load_data():
@@ -68,17 +61,11 @@ def load_data():
         st.error("CSV 파일에 '평수'와 '월세금(만원)' 컬럼이 있어야 합니다.")
         st.stop()
 
-    # 숫자형으로 변환
     df["평수"] = pd.to_numeric(df["평수"], errors="coerce")
     df["월세금(만원)"] = pd.to_numeric(df["월세금(만원)"], errors="coerce")
-
-    # 결측치 제거
     df = df.dropna(subset=["평수", "월세금(만원)"])
-
-    # 전세(월세 0 이하)는 제거
     df = df[df["월세금(만원)"] > 0]
 
-    # 이상치 간단 제거 (IQR 기준 상단만 컷)
     q1, q3 = df["월세금(만원)"].quantile([0.25, 0.75])
     iqr = q3 - q1
     upper = q3 + 1.5 * iqr
@@ -95,35 +82,34 @@ def train_or_load_model():
     X = df[["평수"]].to_numpy(dtype=float)
     y = df["월세금(만원)"].to_numpy(dtype=float)
 
-    # 기존 모델 파일이 있으면 로드 시도
+    # Booster 대신 DMatrix 사용
+    dtrain = xgb.DMatrix(X, label=y)
+
+    # 기존 모델 있으면 로드
     if os.path.exists(MODEL_PATH):
         try:
-            model = joblib.load(MODEL_PATH)
-            return model
-        except Exception:
-            # 깨진 모델이면 새로 학습
+            booster = xgb.Booster()
+            booster.load_model(MODEL_PATH)
+            return booster
+        except:
             pass
 
-    # XGBoost 회귀 모델 정의
-    model = XGBRegressor(
-        n_estimators=300,
-        max_depth=4,
-        learning_rate=0.08,
-        subsample=0.9,
-        colsample_bytree=1.0,
-        reg_lambda=1.0,
-        random_state=42,
-        n_jobs=1,
-        tree_method="hist",
-        objective="reg:squarederror",
-    )
+    params = {
+        "eta": 0.08,
+        "max_depth": 4,
+        "subsample": 0.9,
+        "colsample_bytree": 1.0,
+        "lambda": 1.0,
+        "objective": "reg:squarederror",
+        "tree_method": "hist",
+        "seed": 42
+    }
 
-    # 학습
-    model.fit(X, y)
+    num_round = 300
+    booster = xgb.train(params, dtrain, num_boost_round=num_round)
 
-    # 모델 저장
-    joblib.dump(model, MODEL_PATH)
-    return model
+    booster.save_model(MODEL_PATH)
+    return booster
 
 df = load_data()
 model = train_or_load_model()
@@ -139,11 +125,7 @@ st.divider()
 # ==========================
 st.subheader("📏 평수 입력")
 
-# 기본값: 데이터의 중앙값 사용 (없으면 25평)
-default_pyeong = 25.0
-if "평수" in df.columns and df["평수"].notna().sum() > 0:
-    default_pyeong = float(df["평수"].median())
-
+default_pyeong = float(df["평수"].median())
 pyeong = st.number_input(
     "평수 입력",
     min_value=3.0,
@@ -152,8 +134,8 @@ pyeong = st.number_input(
     step=0.5
 )
 
-# 그래프에서도 필요하니까 미리 예측값 계산
-pred_for_input = float(model.predict(np.array([[pyeong]]))[0])
+dpred = xgb.DMatrix(np.array([[pyeong]]))
+pred_for_input = float(model.predict(dpred)[0])
 
 if st.button("예상 월세 예측하기"):
     st.metric(label=f"{pyeong:.1f}평 예상 월세", value=f"{pred_for_input:.1f} 만원")
@@ -166,30 +148,23 @@ st.divider()
 st.subheader("📊 입력 평수를 기준으로 한 예측 월세 꺾은선 그래프")
 
 if len(df) > 0:
-    # 데이터에서 가능한 평수 범위
     min_p = float(df["평수"].min())
     max_p = float(df["평수"].max())
 
-    # 입력 평수를 기준으로 ±10평 범위 (데이터 범위에 맞게 클리핑)
     p_start = max(min_p, pyeong - 10)
     p_end = min(max_p, pyeong + 10)
 
-    # 만약 범위가 너무 좁으면 전체 범위 사용
     if p_start >= p_end:
         p_start, p_end = min_p, max_p
 
-    # 구간 내에서 여러 점을 찍어서 예측 곡선 생성
     p_range = np.linspace(p_start, p_end, 100).reshape(-1, 1)
-    pred_range = model.predict(p_range)
+    pred_range = model.predict(xgb.DMatrix(p_range))
 
     fig, ax = plt.subplots(figsize=(8, 5))
-
-    # 꺾은선그래프 (평수 vs 예측 월세)
     ax.plot(p_range, pred_range, linewidth=2)
 
-    # 입력한 평수 지점 표시
     ax.scatter([pyeong], [pred_for_input], s=60)
-    ax.axvline(pyeong, linestyle="--")  # 기준선(입력 평수) 세로선
+    ax.axvline(pyeong, linestyle="--")
 
     ax.set_title(f"{pyeong:.1f}평을 기준으로 한 예측 월세 곡선")
     ax.set_xlabel("평수")
@@ -197,8 +172,6 @@ if len(df) > 0:
     ax.grid(True)
 
     st.pyplot(fig)
-else:
-    st.info("그래프를 그릴 데이터가 충분하지 않습니다.")
 
 st.divider()
 st.caption(
